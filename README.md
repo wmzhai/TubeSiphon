@@ -40,9 +40,25 @@ The schema uses `CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`,
 and `CREATE INDEX IF NOT EXISTS`, so rerunning it is safe for the current schema.
 Changing an existing incompatible schema should be handled with a migration.
 
-Available skeleton CLI commands:
+## Channel Metadata Sync
 
-These commands are currently skeleton entrypoints; business logic is not implemented yet.
+Sync a YouTube channel's channel/video metadata into PostgreSQL:
+
+```bash
+export TUBESIPHON_DATABASE_URL="postgresql://user:password@localhost:5432/tubesiphon"
+uv run tube-siphon db init
+uv run tube-siphon sync "https://www.youtube.com/@nicolasyounglive"
+```
+
+`sync` uses `yt-dlp -J` and UPSERTs rows into `channels` and `videos`, so rerunning
+the same channel does not create duplicates. This command currently syncs metadata
+only; subtitle download, transcript processing, chunking, and embeddings are later
+pipeline stages.
+
+Available CLI commands:
+
+`ingest` and `embed` are currently skeleton entrypoints; business logic is not
+implemented yet.
 
 ```bash
 uv run tube-siphon sync <channel_url>

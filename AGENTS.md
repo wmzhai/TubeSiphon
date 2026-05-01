@@ -22,6 +22,45 @@ Read `docs/SPEC.md` before implementing.
 - If a requirement is blocked by local tools, credentials, network access, PostgreSQL, or YouTube access, stop and report the blocker instead of faking success.
 - Prefer small, reviewable changes over broad rewrites.
 
+## YouTube test data policy
+
+For work that touches YouTube fetching, subtitles, transcript parsing, chunking,
+or later pipeline stages that depend on YouTube data, use real channel data from
+this canonical channel instead of invented channel/video metadata:
+
+- Channel URL: `https://www.youtube.com/@nicolasyounglive`
+- Expected channel id: `UCXUP_aBLQBNFgLjvnrMTHtw`
+- Known video id that should appear in the channel video list: `-b9Jvb3Fyqc`
+
+Default tests must use recorded fixtures captured from this real channel. Do
+not invent YouTube channel IDs, channel names, video IDs, watch URLs, playlist
+URLs, or subtitles in tests, docs, or examples. Live tests should hit YouTube
+directly when network and YouTube access are available. Mocking is still
+acceptable at process, database, or error boundaries when the data flowing
+through those boundaries is from the real channel fixture.
+
+Important lesson from OPT-14: a bare YouTube `@handle` URL may return channel
+tabs such as Videos/Shorts instead of actual videos when fetched with
+`yt-dlp -J --flat-playlist`. Channel-list fetching should normalize bare
+channel URLs to their `/videos` listing before parsing video entries.
+
+Run the live fixture explicitly with:
+
+```bash
+TUBESIPHON_RUN_LIVE_TESTS=1 uv run python -m unittest tests.test_live_channel_fixture
+```
+
+If the live check is blocked by cookies, bot checks, network, or PostgreSQL
+credentials, report that blocker plainly in the issue comment. Do not replace
+the live check with invented data.
+
+The repository includes a guard test that fails if common invented YouTube
+placeholder metadata is reintroduced:
+
+```bash
+uv run python -m unittest tests.test_youtube_test_data_policy
+```
+
 ## Fixed local checkout workflow
 
 This project uses a fixed local checkout on the cloud runner.
