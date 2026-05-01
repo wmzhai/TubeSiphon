@@ -1,0 +1,14 @@
+[project]
+name = "tubesiphon"
+version = "0.1.0"
+description = "Python CLI pipeline skeleton for ingesting YouTube subtitles."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+tube-siphon = "tubesiphon.cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
