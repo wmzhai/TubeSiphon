@@ -51,14 +51,25 @@ uv run tube-siphon sync "https://www.youtube.com/@nicolasyounglive"
 ```
 
 `sync` uses `yt-dlp -J` and UPSERTs rows into `channels` and `videos`, so rerunning
-the same channel does not create duplicates. This command currently syncs metadata
-only; subtitle download, transcript processing, chunking, and embeddings are later
-pipeline stages.
+the same channel does not create duplicates.
+
+## Single Video Subtitle Ingest
+
+Ingest subtitles for one video that already exists in the `videos` table:
+
+```bash
+export TUBESIPHON_DATABASE_URL="postgresql://user:password@localhost:5432/tubesiphon"
+uv run tube-siphon ingest "-b9Jvb3Fyqc"
+```
+
+`ingest` uses `yt-dlp` to inspect subtitle tracks, prefers manual WebVTT subtitles,
+falls back to automatic WebVTT captions, parses cue start times and text, and UPSERTs
+rows into `transcripts(video_id, start_time, text)`. Rerunning the same video updates
+existing transcript rows instead of creating duplicates.
 
 Available CLI commands:
 
-`ingest` and `embed` are currently skeleton entrypoints; business logic is not
-implemented yet.
+`embed` is currently a skeleton entrypoint; business logic is not implemented yet.
 
 ```bash
 uv run tube-siphon sync <channel_url>

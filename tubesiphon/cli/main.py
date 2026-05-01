@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from collections.abc import Sequence
 
 from tubesiphon.ingest.channel import ChannelIngestError, sync_channel
+from tubesiphon.ingest.subtitle import SubtitleIngestError, ingest_video
 from tubesiphon.storage.db import TubeSiphonDatabaseError, initialize_database
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="ingest subtitles for one video",
     )
     ingest_parser.add_argument("video_id", help="YouTube video ID")
-    ingest_parser.set_defaults(handler=_not_implemented)
+    ingest_parser.set_defaults(handler=_ingest_video)
 
     embed_parser = subparsers.add_parser(
         "embed",
@@ -79,6 +84,26 @@ def _sync_channel(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ingest_video(args: argparse.Namespace) -> int:
+    try:
+        result = ingest_video(args.video_id)
+    except (SubtitleIngestError, TubeSiphonDatabaseError) as exc:
+        LOGGER.error(
+            "Failed to ingest subtitles for video %s: %s",
+            args.video_id,
+            exc,
+        )
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"Ingested subtitles for {result.video_id}: "
+        f"{result.transcript_count} transcript cues upserted "
+        f"from {result.subtitle_source} subtitles ({result.subtitle_language})."
+    )
+    return 0
+
+
 def _print_command_help(args: argparse.Namespace) -> int:
     args.command_parser.print_help()
     return 0
@@ -97,12 +122,26 @@ def _initialize_database(args: argparse.Namespace) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(_normalize_argv(argv))
     handler = getattr(args, "handler", None)
     if handler is None:
         parser.print_help()
         return 0
     return handler(args)
+
+
+def _normalize_argv(argv: Sequence[str] | None) -> Sequence[str] | None:
+    if argv is None or len(argv) < 2:
+        return argv
+
+    normalized = list(argv)
+    if (
+        normalized[0] == "ingest"
+        and normalized[1].startswith("-")
+        and normalized[1] not in {"-h", "--help", "--"}
+    ):
+        normalized.insert(1, "--")
+    return normalized
 
 
 if __name__ == "__main__":
