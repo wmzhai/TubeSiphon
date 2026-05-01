@@ -18,6 +18,18 @@ Show CLI help:
 uv run tube-siphon --help
 ```
 
+## Database Initialization
+
+Initialize a PostgreSQL database with the pgvector extension available:
+
+```bash
+psql "$DATABASE_URL" -f tubesiphon/storage/schema.sql
+```
+
+The schema uses `CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`,
+and `CREATE INDEX IF NOT EXISTS`, so rerunning it is safe for the current schema.
+Changing an existing incompatible schema should be handled with a migration.
+
 Available skeleton CLI commands:
 
 These commands are currently skeleton entrypoints; business logic is not implemented yet.
