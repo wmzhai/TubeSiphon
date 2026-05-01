@@ -22,6 +22,25 @@ Read `docs/SPEC.md` before implementing.
 - If a requirement is blocked by local tools, credentials, network access, PostgreSQL, or YouTube access, stop and report the blocker instead of faking success.
 - Prefer small, reviewable changes over broad rewrites.
 
+## Fixed local checkout workflow
+
+This project uses a fixed local checkout on the cloud runner.
+
+Canonical local path:
+`/home/optworks/TubeSiphon`
+
+Canonical remote:
+`git@github.com:wmzhai/TubeSiphon.git`
+
+When working on TubeSiphon issues:
+- Work directly in `/home/optworks/TubeSiphon`.
+- Do not create a separate clone for this project.
+- Do not use `multica repo checkout` for this project.
+- Do not copy files between the Multica task workdir and the project checkout.
+- Run git status, tests, commit, and push from `/home/optworks/TubeSiphon`.
+- This is a solo workflow; use the current branch unless the issue says otherwise.
+- Do not run multiple TubeSiphon tasks concurrently against this shared checkout.
+
 ## Git workflow
 
 This is a solo project workflow unless an issue says otherwise.
