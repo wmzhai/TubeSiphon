@@ -1,15 +1,11 @@
 [project]
 name = "tubesiphon"
 version = "0.1.0"
-description = "Python CLI pipeline skeleton for ingesting YouTube subtitles."
+description = "Python CLI for fetching YouTube subtitles into local files."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "pgvector>=0.4.2",
-    "psycopg-pool>=3.3.0",
-    "psycopg[binary]>=3.3.3",
-    "sentence-transformers>=5.4.1",
-    "tqdm>=4.67.3",
+    "pyyaml>=6.0.3",
     "yt-dlp>=2026.3.17",
 ]
 
@@ -19,3 +15,11 @@ tube-siphon = "tubesiphon.cli.main:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

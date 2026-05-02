@@ -22,7 +22,7 @@ class VttParseError(Exception):
 
 @dataclass(frozen=True)
 class TranscriptCue:
-    """One transcript row ready for storage."""
+    """One parsed transcript cue ready for file output."""
 
     start_time: float
     text: str

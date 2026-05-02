@@ -8,12 +8,12 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from psycopg import Error as PsycopgError
-
-from tubesiphon.storage.db import DatabaseConfig, create_connection_pool
+from tubesiphon.output.files import write_channel_files
+from tubesiphon.paths import DEFAULT_OUTPUT_DIR
 
 
 LOGGER = logging.getLogger(__name__)
@@ -39,6 +39,9 @@ class VideoMetadata:
     channel_id: str
     title: str | None
     upload_date: date | None
+    url: str | None
+    timestamp: int | None
+    position: int
 
 
 @dataclass(frozen=True)
@@ -54,12 +57,13 @@ class ChannelMetadata:
 
 @dataclass(frozen=True)
 class ChannelSyncResult:
-    """Summary returned after syncing channel/video metadata."""
+    """Summary returned after syncing a channel to files."""
 
     channel_id: str
     channel_name: str | None
     video_count: int
     skipped_video_count: int
+    output_dir: Path
 
 
 def fetch_channel_metadata(
@@ -116,7 +120,7 @@ def parse_channel_metadata(
     *,
     source_url: str,
 ) -> ChannelMetadata:
-    """Parse yt-dlp channel JSON into storage-ready metadata."""
+    """Parse yt-dlp channel JSON into file-output metadata."""
 
     channel_id = _first_text(payload, "channel_id", "uploader_id", "id")
     if channel_id is None:
@@ -130,7 +134,13 @@ def parse_channel_metadata(
     skipped_video_count = 0
     for index, entry in enumerate(entries):
         try:
-            videos.append(_parse_video_metadata(entry, channel_id=channel_id))
+            videos.append(
+                _parse_video_metadata(
+                    entry,
+                    channel_id=channel_id,
+                    position=index,
+                )
+            )
         except ChannelMetadataError as exc:
             skipped_video_count += 1
             LOGGER.warning(
@@ -145,7 +155,7 @@ def parse_channel_metadata(
         url=_first_text(payload, "channel_url", "uploader_url", "webpage_url")
         or source_url,
         name=_first_text(payload, "channel", "uploader", "title"),
-        videos=videos,
+        videos=_sort_videos_newest_first(videos),
         skipped_video_count=skipped_video_count,
     )
 
@@ -153,39 +163,30 @@ def parse_channel_metadata(
 def sync_channel(
     channel_url: str,
     *,
-    config: DatabaseConfig | str | None = None,
+    output_dir: Path | str = DEFAULT_OUTPUT_DIR,
 ) -> ChannelSyncResult:
-    """Fetch channel/video metadata and UPSERT it into PostgreSQL."""
+    """Fetch a channel video list and write channel index files."""
 
+    output_path = Path(output_dir)
     payload = fetch_channel_metadata(channel_url)
     metadata = parse_channel_metadata(payload, source_url=channel_url)
-    written_video_count = 0
-    skipped_video_count = metadata.skipped_video_count
+    video_entries = [_video_to_output_dict(video) for video in metadata.videos]
 
-    with create_connection_pool(config) as pool:
-        with pool.connection() as connection:
-            _upsert_channel(connection, metadata)
-            for video in metadata.videos:
-                try:
-                    _upsert_video(connection, video)
-                except (PsycopgError, RuntimeError) as exc:
-                    skipped_video_count += 1
-                    LOGGER.exception(
-                        "Skipping video %s for channel %s after database upsert "
-                        "failure: %s",
-                        video.video_id,
-                        metadata.channel_id,
-                        exc,
-                    )
-                    continue
-                written_video_count += 1
-            connection.commit()
+    channel_dir = write_channel_files(
+        output_dir=output_path,
+        channel_id=metadata.channel_id,
+        url=metadata.url,
+        name=metadata.name,
+        videos=video_entries,
+        failures=[],
+    )
 
     return ChannelSyncResult(
         channel_id=metadata.channel_id,
         channel_name=metadata.name,
-        video_count=written_video_count,
-        skipped_video_count=skipped_video_count,
+        video_count=len(metadata.videos),
+        skipped_video_count=metadata.skipped_video_count,
+        output_dir=channel_dir,
     )
 
 
@@ -193,13 +194,13 @@ def _parse_video_metadata(
     entry: object,
     *,
     channel_id: str,
+    position: int,
 ) -> VideoMetadata:
     if not isinstance(entry, Mapping):
         raise ChannelMetadataError("video entry is not an object")
 
-    video_id = _first_text(entry, "id", "video_id") or _extract_video_id(
-        _first_text(entry, "url", "webpage_url")
-    )
+    raw_url = _first_text(entry, "url", "webpage_url")
+    video_id = _first_text(entry, "id", "video_id") or _extract_video_id(raw_url)
     if video_id is None:
         raise ChannelMetadataError("missing video id")
 
@@ -208,6 +209,9 @@ def _parse_video_metadata(
         channel_id=channel_id,
         title=_first_text(entry, "title"),
         upload_date=_parse_upload_date(_first_text(entry, "upload_date")),
+        url=_coerce_watch_url(video_id, raw_url),
+        timestamp=_first_int(entry, "timestamp", "release_timestamp"),
+        position=position,
     )
 
 
@@ -222,47 +226,28 @@ def _parse_upload_date(raw_value: str | None) -> date | None:
     raise ChannelMetadataError(f"invalid upload_date {raw_value!r}")
 
 
-def _upsert_channel(connection: Any, metadata: ChannelMetadata) -> None:
-    connection.execute(
-        """
-        INSERT INTO channels (channel_id, url, name)
-        VALUES (%(channel_id)s, %(url)s, %(name)s)
-        ON CONFLICT (channel_id) DO UPDATE
-        SET url = EXCLUDED.url,
-            name = COALESCE(EXCLUDED.name, channels.name)
-        """,
-        {
-            "channel_id": metadata.channel_id,
-            "url": metadata.url,
-            "name": metadata.name,
-        },
-    )
+def _video_to_output_dict(video: VideoMetadata) -> dict[str, Any]:
+    return {
+        "video_id": video.video_id,
+        "channel_id": video.channel_id,
+        "title": video.title,
+        "upload_date": video.upload_date,
+        "url": video.url,
+        "timestamp": video.timestamp,
+        "position": video.position,
+    }
 
 
-def _upsert_video(connection: Any, metadata: VideoMetadata) -> None:
-    connection.execute(
-        """
-        INSERT INTO videos (video_id, channel_id, title, upload_date, fetched_at)
-        VALUES (
-            %(video_id)s,
-            %(channel_id)s,
-            %(title)s,
-            %(upload_date)s,
-            NOW()
-        )
-        ON CONFLICT (video_id) DO UPDATE
-        SET channel_id = EXCLUDED.channel_id,
-            title = COALESCE(EXCLUDED.title, videos.title),
-            upload_date = COALESCE(EXCLUDED.upload_date, videos.upload_date),
-            fetched_at = NOW()
-        """,
-        {
-            "video_id": metadata.video_id,
-            "channel_id": metadata.channel_id,
-            "title": metadata.title,
-            "upload_date": metadata.upload_date,
-        },
-    )
+def _sort_videos_newest_first(videos: list[VideoMetadata]) -> list[VideoMetadata]:
+    return sorted(videos, key=_video_sort_key)
+
+
+def _video_sort_key(video: VideoMetadata) -> tuple[int, int, int]:
+    if video.upload_date is not None:
+        return (0, -video.upload_date.toordinal(), video.position)
+    if video.timestamp is not None:
+        return (0, -video.timestamp, video.position)
+    return (1, video.position, video.position)
 
 
 def _first_text(mapping: Mapping[str, object], *keys: str) -> str | None:
@@ -273,6 +258,18 @@ def _first_text(mapping: Mapping[str, object], *keys: str) -> str | None:
         text = str(value).strip()
         if text:
             return text
+    return None
+
+
+def _first_int(mapping: Mapping[str, object], *keys: str) -> int | None:
+    for key in keys:
+        value = mapping.get(key)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
     return None
 
 
@@ -292,10 +289,11 @@ def _normalize_channel_listing_url(channel_url: str) -> str:
         return stripped_url
 
     first_part = path_parts[0]
-    is_channel_url = (
-        first_part.startswith("@")
-        or first_part in {"channel", "c", "user"}
-    )
+    is_channel_url = first_part.startswith("@") or first_part in {
+        "channel",
+        "c",
+        "user",
+    }
     if not is_channel_url or path_parts[-1] in {"videos", "shorts", "streams"}:
         return stripped_url
 
@@ -317,3 +315,9 @@ def _extract_video_id(url: str | None) -> str | None:
     if path_parts:
         return path_parts[-1]
     return None
+
+
+def _coerce_watch_url(video_id: str, raw_url: str | None) -> str:
+    if raw_url and raw_url.startswith("http"):
+        return raw_url
+    return f"https://www.youtube.com/watch?v={video_id}"

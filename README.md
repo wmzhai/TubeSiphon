@@ -1,79 +1,65 @@
 # TubeSiphon
 
-TubeSiphon ingests YouTube channel subtitles into PostgreSQL with pgvector embeddings.
+TubeSiphon 是一个 Python 命令行工具。它用 `yt-dlp` 获取 YouTube 频道视频列表和字幕，并把结果写到项目根目录的 `data/`。
 
-Implementation spec: `docs/SPEC.md`.
+详细行为约定见 [docs/SPEC.md](docs/SPEC.md)。
 
-## Local Development
+## 开发
 
-Install and sync the project environment:
+安装依赖：
 
 ```bash
 uv sync
 ```
 
-Show CLI help:
+查看命令：
 
 ```bash
 uv run tube-siphon --help
 ```
 
-## Database Initialization
-
-Create a PostgreSQL database with the pgvector extension available, then set a
-connection string. `TUBESIPHON_DATABASE_URL` is preferred when both variables
-are present; `DATABASE_URL` is also supported.
+运行测试：
 
 ```bash
-export TUBESIPHON_DATABASE_URL="postgresql://user:password@localhost:5432/tubesiphon"
-uv run tube-siphon db init
+uv run pytest
 ```
 
-If the application database role cannot create extensions, create `vector` once
-with a PostgreSQL superuser before running `db init`:
+测试会先清空项目根目录 `data/`，再访问真实频道，抓取频道列表，并下载前 5 个视频字幕。测试结束后不会清理 `data/`，方便直接查看实际结果。
+
+## 使用流程
+
+先抓频道视频列表：
 
 ```bash
-sudo -u postgres psql -d tubesiphon -c "CREATE EXTENSION IF NOT EXISTS vector;"
-```
-
-The schema uses `CREATE EXTENSION IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`,
-and `CREATE INDEX IF NOT EXISTS`, so rerunning it is safe for the current schema.
-Changing an existing incompatible schema should be handled with a migration.
-
-## Channel Metadata Sync
-
-Sync a YouTube channel's channel/video metadata into PostgreSQL:
-
-```bash
-export TUBESIPHON_DATABASE_URL="postgresql://user:password@localhost:5432/tubesiphon"
-uv run tube-siphon db init
 uv run tube-siphon sync "https://www.youtube.com/@nicolasyounglive"
 ```
 
-`sync` uses `yt-dlp -J` and UPSERTs rows into `channels` and `videos`, so rerunning
-the same channel does not create duplicates.
-
-## Single Video Subtitle Ingest
-
-Ingest subtitles for one video that already exists in the `videos` table:
+再根据已保存的视频列表抓字幕：
 
 ```bash
-export TUBESIPHON_DATABASE_URL="postgresql://user:password@localhost:5432/tubesiphon"
-uv run tube-siphon ingest "-b9Jvb3Fyqc"
+uv run tube-siphon ingest "UCXUP_aBLQBNFgLjvnrMTHtw" --limit 5 --workers 4
 ```
 
-`ingest` uses `yt-dlp` to inspect subtitle tracks, prefers manual WebVTT subtitles,
-falls back to automatic WebVTT captions, parses cue start times and text, and UPSERTs
-rows into `transcripts(video_id, start_time, text)`. Rerunning the same video updates
-existing transcript rows instead of creating duplicates.
+`sync` 只写频道索引文件，不下载字幕。`ingest` 读取 `videos.yaml`，按保存顺序处理选中的视频，并把失败记录写入 `failures.yaml`。
 
-Available CLI commands:
+## 输出目录
 
-`embed` is currently a skeleton entrypoint; business logic is not implemented yet.
+```text
+data/<channel_id>/channel.yaml
+data/<channel_id>/videos.yaml
+data/<channel_id>/failures.yaml
+data/<channel_id>/videos/<video_id>/metadata.yaml
+data/<channel_id>/videos/<video_id>/transcript.yaml
+data/<channel_id>/videos/<video_id>/transcript.md
+data/<channel_id>/videos/<video_id>/transcript.vtt
+```
+
+## 命令
 
 ```bash
-uv run tube-siphon sync <channel_url>
-uv run tube-siphon ingest <video_id>
+uv run tube-siphon sync <channel_url> [--output-dir data]
+uv run tube-siphon ingest <channel_id> [--output-dir data] [--limit N] [--workers 4]
 uv run tube-siphon embed
-uv run tube-siphon db init
 ```
+
+`embed` 暂未实现，只保留入口。

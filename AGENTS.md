@@ -1,97 +1,87 @@
-# TubeSiphon Agent Instructions
+# TubeSiphon 代理说明
 
-Project: TubeSiphon, a Python CLI pipeline for ingesting YouTube channel subtitles into PostgreSQL + pgvector.
+TubeSiphon 是一个 Python 命令行项目，用 `yt-dlp` 抓取 YouTube 频道视频列表和字幕，并把结果写入本地文件。
 
-Read `docs/SPEC.md` before implementing.
+实现前先读 [docs/SPEC.md](docs/SPEC.md)。
 
-## Project requirements
+## 项目要求
 
-- Use `uv` only: `uv init`, `uv add`, `uv run`. Do not create requirements.txt.
-- Python >= 3.11.
-- All YouTube metadata/subtitle retrieval must use `yt-dlp`; do not use YouTube official APIs.
-- PostgreSQL storage must use `psycopg`, `psycopg-pool`, and `pgvector`.
-- Pipeline operations must be idempotent via UPSERT/unique constraints.
-- Single video failures must be logged and must not abort the whole channel sync.
-- Use ThreadPoolExecutor for concurrent subtitle retrieval.
-- Provide CLI commands: `sync <channel_url>`, `ingest <video_id>`, `embed`.
+- 只使用 `uv`：`uv init`、`uv add`、`uv run`。不要创建 `requirements.txt`。
+- Python >= 3.11。
+- 所有 YouTube 元数据和字幕都必须通过 `yt-dlp` 获取，不使用 YouTube 官方 API。
+- 频道列表抓取和字幕抓取必须是两个阶段：
+  - `sync <channel_url>` 只抓视频列表。
+  - `ingest <channel_id>` 读取已保存的视频列表再抓字幕。
+- 输出结构以 `docs/SPEC.md` 为准。
+- 重复运行可以覆盖当前文件，但不能在 `videos.yaml` 里产生重复视频。
+- 单个视频字幕失败要记录到 `failures.yaml`，不能中断同批次其他视频。
+- 字幕抓取使用 `ThreadPoolExecutor` 并发。
+- `embed` 保留入口，本轮不实现业务逻辑。
 
-## Development workflow
+## 开发规则
 
-- Keep changes scoped to the current issue. Do not implement future pipeline stages unless the issue explicitly asks for them.
-- Before reporting completion, run verification commands relevant to the changed area and report the exact commands/results.
-- If a requirement is blocked by local tools, credentials, network access, PostgreSQL, or YouTube access, stop and report the blocker instead of faking success.
-- Prefer small, reviewable changes over broad rewrites.
+- 只改当前任务需要的范围，不提前实现后续阶段。
+- 完成前运行相关验证命令，并报告命令和结果。
+- 如果遇到工具、网络、YouTube 访问、cookies 或 bot check 阻塞，直接说明阻塞原因，不伪造成功。
+- 保持改动小而可审查。
 
-## YouTube test data policy
+## 测试数据规则
 
-For work that touches YouTube fetching, subtitles, transcript parsing, chunking,
-or later pipeline stages that depend on YouTube data, use real channel data from
-this canonical channel instead of invented channel/video metadata:
+涉及 YouTube 获取、字幕解析、切分或依赖 YouTube 数据的测试，必须使用下面这个真实频道：
 
-- Channel URL: `https://www.youtube.com/@nicolasyounglive`
-- Expected channel id: `UCXUP_aBLQBNFgLjvnrMTHtw`
-- Known video id that should appear in the channel video list: `-b9Jvb3Fyqc`
+- 频道 URL：`https://www.youtube.com/@nicolasyounglive`
+- 频道 ID：`UCXUP_aBLQBNFgLjvnrMTHtw`
+- 已知视频 ID：`-b9Jvb3Fyqc`
 
-Default tests must use recorded fixtures captured from this real channel. Do
-not invent YouTube channel IDs, channel names, video IDs, watch URLs, playlist
-URLs, or subtitles in tests, docs, or examples. Live tests should hit YouTube
-directly when network and YouTube access are available. Mocking is still
-acceptable at process, database, or error boundaries when the data flowing
-through those boundaries is from the real channel fixture.
+测试必须联网访问 YouTube。不要在测试、文档或示例里编造频道 ID、频道名、视频 ID、观看 URL、播放列表 URL 或字幕内容。除非是在无法用真实频道覆盖的小边界上做保护，否则不要写纯 mock 测试。
 
-Important lesson from OPT-14: a bare YouTube `@handle` URL may return channel
-tabs such as Videos/Shorts instead of actual videos when fetched with
-`yt-dlp -J --flat-playlist`. Channel-list fetching should normalize bare
-channel URLs to their `/videos` listing before parsing video entries.
+注意：裸 `@handle` 频道 URL 用 `yt-dlp -J --flat-playlist` 抓取时，可能返回 Videos/Shorts 等频道标签页，而不是视频条目。抓频道列表前要规范化到 `/videos`。
 
-Run the live fixture explicitly with:
+运行测试：
 
 ```bash
-TUBESIPHON_RUN_LIVE_TESTS=1 uv run python -m unittest tests.test_live_channel_fixture
+uv run pytest
 ```
 
-If the live check is blocked by cookies, bot checks, network, or PostgreSQL
-credentials, report that blocker plainly in the issue comment. Do not replace
-the live check with invented data.
+测试会清空项目根目录 `data/`，抓取真实频道列表，并下载前 5 个视频字幕。测试结束后保留 `data/`，方便检查真实输出。
 
-The repository includes a guard test that fails if common invented YouTube
-placeholder metadata is reintroduced:
+## 固定 checkout 工作流
 
-```bash
-uv run python -m unittest tests.test_youtube_test_data_policy
+云端 runner 使用固定本地 checkout。
+
+规范路径：
+
+```text
+/home/optworks/TubeSiphon
 ```
 
-## Fixed local checkout workflow
+规范远端：
 
-This project uses a fixed local checkout on the cloud runner.
+```text
+git@github.com:wmzhai/TubeSiphon.git
+```
 
-Canonical local path:
-`/home/optworks/TubeSiphon`
+处理 TubeSiphon 任务时：
 
-Canonical remote:
-`git@github.com:wmzhai/TubeSiphon.git`
+- 直接在固定 checkout 中工作。
+- 不要另行 clone。
+- 不要使用 `multica repo checkout`。
+- 不要在 Multica 任务目录和项目 checkout 之间复制文件。
+- 在项目 checkout 内运行 `git status`、测试、提交和推送。
+- 默认使用当前分支，除非任务明确要求新分支。
+- 不要并发处理多个 TubeSiphon 任务。
 
-When working on TubeSiphon issues:
-- Work directly in `/home/optworks/TubeSiphon`.
-- Do not create a separate clone for this project.
-- Do not use `multica repo checkout` for this project.
-- Do not copy files between the Multica task workdir and the project checkout.
-- Run git status, tests, commit, and push from `/home/optworks/TubeSiphon`.
-- This is a solo workflow; use the current branch unless the issue says otherwise.
-- Do not run multiple TubeSiphon tasks concurrently against this shared checkout.
+## Git 规则
 
-## Git workflow
+需要提交或推送时：
 
-This is a solo project workflow unless an issue says otherwise.
-
-When asked to commit or push:
-- Use the current branch. Do not create a new branch or PR unless explicitly requested.
-- Review `git status` and `git diff` before committing.
-- Run verification relevant to the current issue before committing.
-- Commit only files related to the current issue; do not include unrelated local changes.
-- Use a concise Conventional Commits style message when practical.
-- Push to the configured `origin` for the current branch.
-- Never force push unless explicitly requested.
-- If verification, commit, or push fails, stop and report the reason.
-- After a successful push, report the branch, commit hash, remote URL, and verification results.
-- Do not implement new business logic during a commit/push-only request.
+- 使用当前分支，除非用户明确要求，不新建分支或 PR。
+- 提交前查看 `git status` 和 `git diff`。
+- 提交前运行与当前改动相关的验证。
+- 只提交当前任务相关文件，不带入无关本地改动。
+- 提交信息尽量使用简洁的 Conventional Commits 风格。
+- 推送到当前分支配置的 `origin`。
+- 不要 force push，除非用户明确要求。
+- 如果验证、提交或推送失败，停下来报告原因。
+- 推送成功后报告分支、commit hash、远端 URL 和验证结果。
+- 只做提交或推送请求时，不新增业务逻辑。

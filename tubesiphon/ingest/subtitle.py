@@ -1,4 +1,4 @@
-"""Single-video subtitle download and transcript ingestion."""
+"""Single-video subtitle download and transcript file output."""
 
 from __future__ import annotations
 
@@ -7,18 +7,20 @@ import logging
 import subprocess
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from psycopg import Error as PsycopgError
-
-from tubesiphon.ingest.parser import TranscriptCue, VttParseError, parse_vtt
-from tubesiphon.storage.db import (
-    DatabaseConfig,
-    TubeSiphonDatabaseError,
-    create_connection_pool,
+from tubesiphon.ingest.parser import VttParseError, parse_vtt
+from tubesiphon.output.files import (
+    FileOutputError,
+    read_yaml_mapping,
+    upsert_channel_video,
+    write_channel_failures,
+    write_video_files,
 )
+from tubesiphon.paths import DEFAULT_OUTPUT_DIR
 
 
 LOGGER = logging.getLogger(__name__)
@@ -52,6 +54,14 @@ class SubtitleParseError(SubtitleIngestError):
     """Raised when a downloaded subtitle file cannot be parsed."""
 
 
+class SubtitleMetadataError(SubtitleIngestError):
+    """Raised when yt-dlp metadata is missing required channel ownership."""
+
+
+class SubtitleOutputError(SubtitleIngestError):
+    """Raised when transcript output files cannot be written."""
+
+
 @dataclass(frozen=True)
 class SubtitleTrack:
     """A chosen subtitle track from yt-dlp metadata."""
@@ -65,6 +75,11 @@ class DownloadedSubtitle:
     """Downloaded WebVTT content and its source metadata."""
 
     video_id: str
+    channel_id: str | None
+    channel_name: str | None
+    channel_url: str | None
+    title: str | None
+    webpage_url: str | None
     language: str
     source: SubtitleSource
     content: str
@@ -78,6 +93,18 @@ class VideoTranscriptIngestResult:
     transcript_count: int
     subtitle_language: str
     subtitle_source: SubtitleSource
+    output_dir: Path
+
+
+@dataclass(frozen=True)
+class ChannelSubtitleIngestResult:
+    """Summary returned after ingesting transcripts from a channel video list."""
+
+    channel_id: str
+    requested_video_count: int
+    ingested_video_count: int
+    failure_count: int
+    output_dir: Path
 
 
 def select_subtitle_track(payload: Mapping[str, Any]) -> SubtitleTrack:
@@ -106,7 +133,7 @@ def fetch_video_subtitle(
 
     video_url = _coerce_video_url(video_id)
     payload = _fetch_video_metadata(video_url, yt_dlp_binary=yt_dlp_binary)
-    resolved_video_id = str(payload.get("id") or video_id).strip()
+    resolved_video_id = _first_text(payload, "id") or video_id.strip()
     candidates = list(_iter_candidate_tracks(payload))
     if not candidates:
         message = f"No manual or automatic WebVTT subtitles found for {video_id}"
@@ -136,6 +163,12 @@ def fetch_video_subtitle(
 
             return DownloadedSubtitle(
                 video_id=resolved_video_id,
+                channel_id=_first_text(payload, "channel_id", "uploader_id"),
+                channel_name=_first_text(payload, "channel", "uploader"),
+                channel_url=_first_text(payload, "channel_url", "uploader_url"),
+                title=_first_text(payload, "title", "fulltitle"),
+                webpage_url=_first_text(payload, "webpage_url", "original_url")
+                or video_url,
                 language=track.language,
                 source=track.source,
                 content=content,
@@ -150,40 +183,153 @@ def fetch_video_subtitle(
 def ingest_video(
     video_id: str,
     *,
-    config: DatabaseConfig | str | None = None,
+    output_dir: Path | str = DEFAULT_OUTPUT_DIR,
+    update_channel_index: bool = True,
+    expected_channel_id: str | None = None,
 ) -> VideoTranscriptIngestResult:
-    """Download, parse, and UPSERT transcripts for one video."""
+    """Download, parse, and write transcript files for one video."""
 
     try:
         downloaded = fetch_video_subtitle(video_id)
+    except SubtitleIngestError as exc:
+        LOGGER.error("Failed to ingest subtitles for video %s: %s", video_id, exc)
+        raise
+
+    if not downloaded.channel_id:
+        message = f"yt-dlp metadata for {downloaded.video_id} is missing channel_id"
+        LOGGER.error(message)
+        raise SubtitleMetadataError(message)
+    if expected_channel_id is not None and downloaded.channel_id != expected_channel_id:
+        message = (
+            f"yt-dlp metadata for {downloaded.video_id} has channel_id "
+            f"{downloaded.channel_id}, expected {expected_channel_id}"
+        )
+        LOGGER.error(message)
+        raise SubtitleMetadataError(message)
+
+    try:
         cues = parse_vtt(downloaded.content)
     except VttParseError as exc:
         message = f"Failed to parse subtitles for {video_id}: {exc}"
         LOGGER.error(message)
         raise SubtitleParseError(message) from exc
-    except SubtitleIngestError as exc:
-        LOGGER.error("Failed to ingest subtitles for video %s: %s", video_id, exc)
-        raise
+
+    video_metadata = {
+        "video_id": downloaded.video_id,
+        "channel_id": downloaded.channel_id,
+        "title": downloaded.title,
+        "url": downloaded.webpage_url or _coerce_video_url(downloaded.video_id),
+    }
+    channel_url = downloaded.channel_url or (
+        f"https://www.youtube.com/channel/{downloaded.channel_id}"
+    )
 
     try:
-        with create_connection_pool(config) as pool:
-            with pool.connection() as connection:
-                for cue in cues:
-                    _upsert_transcript(connection, video_id, cue)
-                connection.commit()
-    except TubeSiphonDatabaseError:
-        LOGGER.error("Failed to ingest subtitles for video %s due to database setup", video_id)
-        raise
-    except (PsycopgError, RuntimeError) as exc:
-        message = f"Failed to upsert transcripts for video {video_id}: {exc}"
-        LOGGER.exception(message)
-        raise SubtitleIngestError(message) from exc
+        if update_channel_index:
+            upsert_channel_video(
+                output_dir=output_dir,
+                channel_id=downloaded.channel_id,
+                url=channel_url,
+                name=downloaded.channel_name,
+                video=video_metadata,
+            )
+        video_dir = write_video_files(
+            output_dir=output_dir,
+            channel_id=downloaded.channel_id,
+            metadata=video_metadata,
+            language=downloaded.language,
+            source=downloaded.source,
+            cues=cues,
+            vtt_content=downloaded.content,
+        )
+    except FileOutputError as exc:
+        message = f"Failed to write transcript files for {downloaded.video_id}: {exc}"
+        LOGGER.error(message)
+        raise SubtitleOutputError(message) from exc
 
     return VideoTranscriptIngestResult(
         video_id=downloaded.video_id,
         transcript_count=len(cues),
         subtitle_language=downloaded.language,
         subtitle_source=downloaded.source,
+        output_dir=video_dir,
+    )
+
+
+def ingest_channel_subtitles(
+    channel_id: str,
+    *,
+    output_dir: Path | str = DEFAULT_OUTPUT_DIR,
+    limit: int | None = None,
+    workers: int = 4,
+) -> ChannelSubtitleIngestResult:
+    """Read a channel video list and fetch subtitles in saved order."""
+
+    if workers < 1:
+        raise SubtitleIngestError("--workers must be at least 1")
+    if limit is not None and limit < 1:
+        raise SubtitleIngestError("--limit must be at least 1")
+
+    output_path = Path(output_dir)
+    channel_dir = output_path / channel_id
+    videos_yaml_path = channel_dir / "videos.yaml"
+    videos_yaml = read_yaml_mapping(videos_yaml_path)
+    videos = videos_yaml.get("videos")
+    if not isinstance(videos, list):
+        raise SubtitleIngestError(f"Video list not found: {videos_yaml_path}")
+
+    selected_videos = [
+        video for video in videos if isinstance(video, Mapping) and video.get("video_id")
+    ]
+    if limit is not None:
+        selected_videos = selected_videos[:limit]
+
+    failures: list[dict[str, str]] = []
+    ingested_video_count = 0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_video = {
+            executor.submit(
+                ingest_video,
+                str(video["video_id"]),
+                output_dir=output_path,
+                update_channel_index=False,
+                expected_channel_id=channel_id,
+            ): video
+            for video in selected_videos
+        }
+        for future in as_completed(future_to_video):
+            video = future_to_video[future]
+            video_id = str(video["video_id"])
+            try:
+                future.result()
+            except Exception as exc:
+                failures.append(
+                    {
+                        "video_id": video_id,
+                        "error": str(exc) or exc.__class__.__name__,
+                    }
+                )
+                LOGGER.warning(
+                    "Skipping video %s for channel %s after subtitle failure: %s",
+                    video_id,
+                    channel_id,
+                    exc,
+                )
+                continue
+            ingested_video_count += 1
+
+    failures.sort(key=lambda failure: _video_position(failure["video_id"], selected_videos))
+    write_channel_failures(
+        output_dir=output_path,
+        channel_id=channel_id,
+        failures=failures,
+    )
+    return ChannelSubtitleIngestResult(
+        channel_id=channel_id,
+        requested_video_count=len(selected_videos),
+        ingested_video_count=ingested_video_count,
+        failure_count=len(failures),
+        output_dir=channel_dir,
     )
 
 
@@ -331,27 +477,29 @@ def _read_downloaded_vtt(output_dir: Path, track: SubtitleTrack) -> str:
     return subtitle_files[0].read_text(encoding="utf-8")
 
 
-def _upsert_transcript(connection: Any, video_id: str, cue: TranscriptCue) -> None:
-    connection.execute(
-        """
-        INSERT INTO transcripts (video_id, start_time, text)
-        VALUES (%(video_id)s, %(start_time)s, %(text)s)
-        ON CONFLICT (video_id, start_time) DO UPDATE
-        SET text = EXCLUDED.text
-        """,
-        {
-            "video_id": video_id,
-            "start_time": cue.start_time,
-            "text": cue.text,
-        },
-    )
-
-
 def _coerce_video_url(video_id_or_url: str) -> str:
     value = video_id_or_url.strip()
     if "://" in value:
         return value
     return f"https://www.youtube.com/watch?v={value}"
+
+
+def _first_text(mapping: Mapping[str, object], *keys: str) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _video_position(video_id: str, videos: Sequence[Mapping[str, object]]) -> int:
+    for index, video in enumerate(videos):
+        if str(video.get("video_id") or "") == video_id:
+            return index
+    return len(videos)
 
 
 def _completed_process_detail(completed_process: object) -> str:
